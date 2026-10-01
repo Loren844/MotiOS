@@ -68,6 +68,7 @@ function getWildIvFloor(weatherBoost) {
 const ENCOUNTER_SOURCES = {
     wild: { minIv: 0, boostedMinIv: WEATHER_BOOST_IV_FLOOR },
     raid: { level: 20, boostedLevel: 25, minIv: 10 },
+    shadowRaid: { level: 20, boostedLevel: 25, minIv: 6 },
     research: { level: 15, minIv: 10 },
     rocket: { level: 8, boostedLevel: 13, minIv: 0, boostedMinIv: WEATHER_BOOST_IV_FLOOR },
     giovanni: { level: 8, boostedLevel: 13, minIv: 6 },
@@ -117,10 +118,21 @@ function calculatePotentialIvs(baseStats, cp, options = {}) {
 
     const candidates = [];
     for (const level of levels) {
+        const multiplier = CP_MULTIPLIERS[Math.round((level - 1) * 2)];
+        if (!Number.isFinite(multiplier)) {
+            throw new RangeError("level must be between 1 and 50 in 0.5 increments");
+        }
+
+        // Hoisted out of the inner loops: this runs across every source and form on each scan.
+        const multiplierSquared = multiplier ** 2;
         for (let attack = minIv; attack <= 15; attack += 1) {
+            const attackStat = baseStats.atk + attack;
             for (let defense = minIv; defense <= 15; defense += 1) {
+                const defenseRoot = Math.sqrt(baseStats.def + defense);
                 for (let stamina = minIv; stamina <= 15; stamina += 1) {
-                    if (calculateCp(baseStats, level, attack, defense, stamina) === cp) {
+                    const staminaRoot = Math.sqrt(baseStats.hp + stamina);
+                    const value = Math.max(10, Math.floor((attackStat * defenseRoot * staminaRoot * multiplierSquared) / 10));
+                    if (value === cp) {
                         candidates.push({
                             level,
                             attack,

@@ -3,7 +3,8 @@
 const {
   calculatePotentialIvs,
   summarizePotentialIvs,
-  getEncounterConstraints
+  getEncounterConstraints,
+  ENCOUNTER_SOURCES
 } = importModule("iv-calculator");
 
 const GAME_MASTER_URL = "https://raw.githubusercontent.com/pvpoke/pvpoke/master/src/data/gamemaster.json";
@@ -16,12 +17,40 @@ const TRAINER_LEVEL_KEY = "motios-trainer-level";
 // Wild levels stop at 30, so this default is exact for any trainer at level 30 or above.
 const DEFAULT_TRAINER_LEVEL = 30;
 
+// Pokemon GO boost table: in-game weather category -> boosted types.
+const WEATHER_BOOSTS = {
+  clear: ["grass", "ground", "fire"],
+  partlyCloudy: ["normal", "rock"],
+  cloudy: ["fairy", "fighting", "poison"],
+  rain: ["water", "electric", "bug"],
+  snow: ["ice", "steel"],
+  fog: ["dark", "ghost"],
+  windy: ["dragon", "flying", "psychic"]
+};
+
+// WMO weather codes from Open-Meteo, grouped into Pokemon GO weather categories.
+const WMO_WEATHER_CATEGORIES = {
+  clear: [0, 1],
+  partlyCloudy: [2],
+  cloudy: [3],
+  fog: [45, 48],
+  rain: [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99],
+  snow: [71, 73, 75, 77, 85, 86]
+};
+const WINDY_SPEED_KMH = 24;
+
+// Patterns swallow the connecting particle too, so "Rattata d'Alola" reduces to "Rattata".
 const REGIONAL_FORMS = [
-  { pattern: /alola/i, suffix: "alolan" },
-  { pattern: /galar/i, suffix: "galarian" },
-  { pattern: /hisui/i, suffix: "hisuian" },
-  { pattern: /paldea/i, suffix: "paldean" }
+  { pattern: /\b(?:d['’]\s*|de\s+)?alola\w*\b/i, suffix: "alolan" },
+  { pattern: /\b(?:de\s+)?galar\w*\b/i, suffix: "galarian" },
+  { pattern: /\b(?:de\s+)?hisui\w*\b/i, suffix: "hisuian" },
+  { pattern: /\b(?:de\s+)?paldea\w*\b/i, suffix: "paldean" }
 ];
+
+// The encounter screen also shows a clock, a battery level and item counts.
+const CP_LABEL_PATTERN = /\b(?:PC|CP|WP)\b\s*[:.]?\s*(\d{1,5})/i;
+const CLOCK_PATTERN = /\b\d{1,2}\s*[:hH]\s*\d{2}\b/g;
+const PERCENT_PATTERN = /\d+\s*%/g;
 
 const COPY = {
   fr: {
@@ -29,46 +58,32 @@ const COPY = {
     name: "Nom",
     cp: "PC",
     calculate: "Calculer",
-    invalidInput: "Nom ou PC invalide.",
+    invalidInput: "PC introuvable dans le texte lu. Verifie la capture.",
     noResult: "Aucune combinaison IV trouvee pour {name} a {cp} PC.",
     notFound: "Pokemon introuvable : {name}. Verifie le texte lu par l'OCR.",
-    combinations: "combinaisons possibles",
-    range: "IV possibles",
-    median: "IV median",
-    great: "Chance IV >= 80 %",
-    excellent: "Chance IV >= 90 %",
-    perfect: "Chance de 100 %",
-    best: "Meilleur cas",
-    worst: "Pire cas",
-    level: "Niveau",
+    max: "max",
     boosted: "Meteo boostee",
-    verdictKeep: "A garder",
-    verdictMaybe: "A verifier apres capture",
-    verdictSkip: "Peu interessant",
-    close: "OK"
+    legend: "% = chance d'avoir au moins 80 % d'IV",
+    verdictKeep: "A capturer",
+    verdictMaybe: "A verifier",
+    verdictSkip: "A ignorer",
+    error: "Erreur"
   },
   en: {
     title: "MotiOS",
     name: "Name",
     cp: "CP",
     calculate: "Calculate",
-    invalidInput: "Invalid name or CP.",
+    invalidInput: "No CP found in the scanned text. Check the screenshot.",
     noResult: "No IV combination found for {name} at {cp} CP.",
     notFound: "Pokemon not found: {name}. Check the OCR text.",
-    combinations: "possible combinations",
-    range: "Possible IVs",
-    median: "Median IV",
-    great: "Chance IV >= 80%",
-    excellent: "Chance IV >= 90%",
-    perfect: "Chance of 100%",
-    best: "Best case",
-    worst: "Worst case",
-    level: "Level",
+    max: "max",
     boosted: "Weather boosted",
-    verdictKeep: "Worth keeping",
-    verdictMaybe: "Check after catching",
-    verdictSkip: "Low value",
-    close: "OK"
+    legend: "% = chance of at least 80% IV",
+    verdictKeep: "Catch it",
+    verdictMaybe: "Worth a check",
+    verdictSkip: "Skip it",
+    error: "Error"
   }
 };
 
@@ -232,19 +247,67 @@ function findPokemon(gameMaster, nameCatalog, pokemonName) {
 }
 
 function parseCp(value) {
-  const match = String(value || "").match(/(?:PC|CP)\s*[:.]?\s*(\d{1,5})/i);
-  return match ? Number.parseInt(match[1], 10) : Number.parseInt(String(value || "").replace(/\D/g, ""), 10);
+  const text = String(value ?? "");
+  const labelled = text.match(CP_LABEL_PATTERN);
+  if (labelled) return Number.parseInt(labelled[1], 10);
+
+  const digits = text.match(/\b\d{2,5}\b/g);
+  const plausible = (digits || []).map(Number).filter((number) => number >= 10 && number <= 6000);
+  return plausible.length === 1 ? plausible[0] : NaN;
+}
+
+// Without a "PC" label the Poke Ball counter and the clock look just like a CP value, so the
+// number printed closest to the Pokemon name wins: on the encounter screen they sit together.
+function parseCpFromOcr(text, nameLineIndex) {
+  const labelled = String(text).match(CP_LABEL_PATTERN);
+  if (labelled) return Number.parseInt(labelled[1], 10);
+
+  const candidates = [];
+  String(text).split(/\r?\n/).forEach((line, index) => {
+    const cleaned = line.replace(CLOCK_PATTERN, " ").replace(PERCENT_PATTERN, " ");
+    for (const digits of cleaned.match(/\b\d{2,5}\b/g) || []) {
+      const value = Number(digits);
+      if (value >= 10 && value <= 6000) candidates.push({ value, index });
+    }
+  });
+
+  if (candidates.length === 0) return NaN;
+  if (nameLineIndex < 0) return Math.max(...candidates.map((candidate) => candidate.value));
+
+  candidates.sort((left, right) => (
+    Math.abs(left.index - nameLineIndex) - Math.abs(right.index - nameLineIndex)
+    || right.value - left.value
+  ));
+  return candidates[0].value;
+}
+
+function cleanOcrLines(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .map((line) => line
+      .replace(CP_LABEL_PATTERN, " ")
+      .replace(CLOCK_PATTERN, " ")
+      .replace(PERCENT_PATTERN, " ")
+      .replace(/\d+/g, " ")
+      .trim());
 }
 
 function findPokemonInOcr(gameMaster, nameCatalog, text) {
-  const lines = String(text)
-    .split(/\r?\n/)
-    .map((line) => line.replace(/(?:PC|CP)\s*[:.]?\s*\d{1,5}/gi, "").trim())
-    .filter(Boolean);
+  const lines = cleanOcrLines(text);
 
-  for (const line of lines) {
-    const pokemon = findPokemon(gameMaster, nameCatalog, line);
-    if (pokemon) return { pokemon, name: line };
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].length < 3) continue;
+    const pokemon = findPokemon(gameMaster, nameCatalog, lines[index]);
+    if (pokemon) return { pokemon, name: lines[index], lineIndex: index };
+  }
+
+  // OCR often glues interface words onto the name, so retry word by word.
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const word of lines[index].split(/\s+/)) {
+      if (word.length < 3) continue;
+      const pokemon = findPokemon(gameMaster, nameCatalog, word);
+      if (pokemon) return { pokemon, name: word, lineIndex: index };
+    }
   }
   return null;
 }
@@ -265,75 +328,140 @@ function getTrainerLevel(input) {
 function isWeatherBoosted(input, ocrText) {
   if (typeof input.weatherBoost === "boolean") return input.weatherBoost;
   if (typeof input.weather === "boolean") return input.weather;
-  return /meteo|weather|boost/i.test(ocrText);
+  if (/meteo|weather|boost/i.test(ocrText)) return true;
+  return null;
 }
 
-function getVerdict(summary, copy) {
-  if (summary.greatChance >= 50) return copy.verdictKeep;
-  if (summary.greatChance >= 10) return copy.verdictMaybe;
-  return copy.verdictSkip;
+function getWeatherCategory(weatherCode, windSpeedKmh) {
+  if (windSpeedKmh >= WINDY_SPEED_KMH && (weatherCode === 0 || weatherCode === 1 || weatherCode === 2)) {
+    return "windy";
+  }
+  return Object.keys(WMO_WEATHER_CATEGORIES).find(
+    (category) => WMO_WEATHER_CATEGORIES[category].includes(weatherCode)
+  ) ?? null;
+}
+
+async function detectWeatherBoost(pokemonTypes) {
+  try {
+    Location.setAccuracyToThreeKilometers();
+    const { latitude, longitude } = await Location.current();
+    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true`;
+    const response = await new Request(weatherUrl).loadJSON();
+    const category = getWeatherCategory(response.current_weather.weathercode, response.current_weather.windspeed);
+    if (!category) return false;
+    return pokemonTypes.some((type) => WEATHER_BOOSTS[category].includes(type));
+  } catch (error) {
+    return null;
+  }
+}
+
+function getVerdict(greatChance, copy) {
+  if (greatChance >= 50) return { emoji: "\u2705", text: copy.verdictKeep };
+  if (greatChance >= 10) return { emoji: "\u2753", text: copy.verdictMaybe };
+  return { emoji: "\u274C", text: copy.verdictSkip };
 }
 
 function formatPercent(value) {
   return value.toFixed(1).replace(".", ",");
 }
 
-async function showResult(input) {
+function formatSourceLabel(source) {
+  return source.replace(/([A-Z])/g, " $1").toUpperCase();
+}
+
+function getFormLabel(speciesName) {
+  const match = String(speciesName).match(/\(([^)]+)\)/);
+  return match ? match[1] : "Base";
+}
+
+function getSpeciesForms(gameMaster, dex) {
+  const pokemon = gameMaster.pokemon || gameMaster;
+  return pokemon.filter((entry) => (
+    Number(entry.dex) === dex
+    && entry.baseStats
+    && !/_shadow|_mega|_purified/.test(entry.speciesId)
+  ));
+}
+
+// Several encounter types share the same level and IV floor, so they are merged into one row.
+// A row is kept only when the scanned CP is reachable there, which keeps the output specific.
+function buildSourceRows(forms, cp, trainerLevel, weatherBoost) {
+  const groups = new Map();
+
+  for (const source of Object.keys(ENCOUNTER_SOURCES)) {
+    const constraints = getEncounterConstraints(source, trainerLevel, weatherBoost);
+    const key = `${constraints.levels.join(",")}|${constraints.minIv}`;
+    if (!groups.has(key)) groups.set(key, { constraints, sources: [] });
+    groups.get(key).sources.push(formatSourceLabel(source));
+  }
+
+  const rows = [];
+  for (const group of groups.values()) {
+    const parts = [];
+    for (const form of forms) {
+      const summary = summarizePotentialIvs(calculatePotentialIvs(form.baseStats, cp, group.constraints));
+      if (summary) parts.push({ label: getFormLabel(form.speciesName), summary });
+    }
+    if (parts.length > 0) rows.push({ label: group.sources.join(" / "), parts });
+  }
+
+  return rows;
+}
+
+async function buildResult(input) {
   const copy = getCopy(input.locale);
   const name = String(input.name || "").trim();
   const ocrText = String(input.text || input.ocr || input.ocrText || "");
-  const cp = parseCp(input.cp) || parseCp(ocrText);
-  if (!Number.isInteger(cp) || cp < 10) {
-    throw new Error(copy.invalidInput);
-  }
 
   const [gameMaster, nameCatalog] = await Promise.all([getGameMaster(), getNameCatalog()]);
   const ocrMatch = name ? null : findPokemonInOcr(gameMaster, nameCatalog, ocrText);
   const pokemon = name ? findPokemon(gameMaster, nameCatalog, name) : ocrMatch?.pokemon;
-  const displayName = pokemon?.speciesName || name || ocrMatch?.name || "OCR";
   if (!pokemon?.baseStats) {
     throw new Error(formatMessage(copy.notFound, { name: name || ocrText.split(/\r?\n/)[0] || "OCR" }));
   }
 
-  const weatherBoost = isWeatherBoosted(input, ocrText);
+  const cp = parseCp(input.cp) || parseCpFromOcr(ocrText, ocrMatch ? ocrMatch.lineIndex : -1);
+  if (!Number.isInteger(cp) || cp < 10) {
+    throw new Error(copy.invalidInput);
+  }
+
+  const forms = getSpeciesForms(gameMaster, Number(pokemon.dex));
+  const weatherBoost = isWeatherBoosted(input, ocrText) ?? await detectWeatherBoost(pokemon.types || []) ?? false;
   const trainerLevel = getTrainerLevel(input);
-  const source = String(input.source || "wild").toLowerCase();
-  const constraints = getEncounterConstraints(source, trainerLevel, weatherBoost);
-  const summary = summarizePotentialIvs(calculatePotentialIvs(pokemon.baseStats, cp, constraints));
-  if (!summary) {
+  const rows = buildSourceRows(forms, cp, trainerLevel, weatherBoost);
+  const displayName = pokemon.speciesName.replace(/\s*\([^)]*\)/g, "");
+  if (rows.length === 0) {
     throw new Error(formatMessage(copy.noResult, { name: displayName, cp }));
   }
 
-  const best = summary.best;
-  const worst = summary.worst;
-  const levelRange = summary.minLevel === summary.maxLevel
-    ? `${summary.minLevel}`
-    : `${summary.minLevel} - ${summary.maxLevel}`;
-  const alert = new Alert();
-  alert.title = `${displayName} - ${cp} ${copy.cp}`;
-  alert.message = [
-    getVerdict(summary, copy),
-    `${copy.great}: ${formatPercent(summary.greatChance)} %`,
-    `${copy.excellent}: ${formatPercent(summary.excellentChance)} %`,
-    `${copy.perfect}: ${formatPercent(summary.perfectChance)} %`,
-    `${copy.median}: ${formatPercent(summary.medianPercent)} %`,
-    `${copy.range}: ${formatPercent(summary.minPercent)} a ${formatPercent(summary.maxPercent)} %`,
-    `${copy.best}: ${best.attack}/${best.defense}/${best.stamina}`,
-    `${copy.worst}: ${worst.attack}/${worst.defense}/${worst.stamina}`,
-    `${copy.level}: ${levelRange}`,
-    `${summary.count} ${copy.combinations}${weatherBoost ? ` - ${copy.boosted}` : ""}`
-  ].join("\n");
-  alert.addAction(copy.close);
-  await alert.presentAlert();
+  const allSummaries = rows.flatMap((row) => row.parts.map((part) => part.summary));
+  const maxPercent = Math.max(...allSummaries.map((summary) => summary.maxPercent));
+  const decisionRow = rows.find((row) => row.label.startsWith("WILD")) ?? rows[0];
+  const decisionChance = Math.max(...decisionRow.parts.map((part) => part.summary.greatChance));
+  const verdict = getVerdict(decisionChance, copy);
+
+  const body = [
+    `${displayName} - ${cp} ${copy.cp} - ${copy.max} ${formatPercent(maxPercent)} %`,
+    ...rows.map((row) => `${row.label} ${row.parts
+      .map((part) => `${part.label} ${formatPercent(part.summary.greatChance)} %`)
+      .join(" - ")}`),
+    weatherBoost ? copy.boosted : null,
+    copy.legend
+  ].filter(Boolean).join("\n");
+
+  return { title: `${verdict.emoji} ${verdict.text}`, body };
 }
 
 try {
   const input = parseInput();
-  await showResult(input || await askForInput(getCopy("fr")));
+  const result = await buildResult(input || await askForInput(getCopy("fr")));
+  Script.setShortcutOutput(result);
+  console.log(`${result.title}\n${result.body}`);
 } catch (error) {
-  const alert = new Alert();
-  alert.title = "MotiOS";
-  alert.message = error.message || String(error);
-  alert.addAction("OK");
-  await alert.presentAlert();
+  const copy = getCopy("fr");
+  const result = { title: `\u26A0\uFE0F ${copy.error}`, body: error.message || String(error) };
+  Script.setShortcutOutput(result);
+  console.log(`${result.title}\n${result.body}`);
 }
+
+Script.complete();
