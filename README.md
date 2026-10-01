@@ -38,7 +38,8 @@ Your Shortcut must obtain the raw text with iOS OCR. MotiOS extracts the Pokemon
 2. Add Scriptable's `Run Script` action.
 3. Select the `MotiOS` script.
 4. Pass the OCR text directly to the Scriptable action's `Parameter` field. MotiOS also accepts JSON with a `text` property.
-5. Test with this OCR text:
+5. MotiOS returns a dictionary with two keys, `title` and `body`. Use them in a `Show Alert` or notification action in Shortcuts.
+6. Test with this OCR text:
 
 ```text
 Pikachu
@@ -59,14 +60,17 @@ If you are below level 30, you must set your real level, otherwise MotiOS keeps 
 
 Set `weatherBoost` to `true` when the encounter shows the weather-boost swirl. This both shifts the level window by 5 and raises the IV floor to 4, which sharply narrows the result.
 
+If you omit `weatherBoost`, MotiOS asks iOS for your location once per scan, reads the current weather from Open-Meteo (no API key needed), and checks it against the Pokemon's types to decide on its own. Allow location access when prompted. If location or network is unavailable, it falls back to no boost.
+
 ### 5. Optional: declare the encounter type
 
-For anything that is not a wild spawn, pass `source` to pin the level exactly. This is by far the largest precision gain.
+MotiOS already reports every encounter type that can produce the scanned CP, so `source` is no longer required. The table below documents the levels and IV floors it applies.
 
 | `source` | Level | IV floor |
 | --- | --- | --- |
 | `wild` (default) | 1 to 30 | 0, or 4 when boosted |
 | `raid` | 20, or 25 boosted | 10 |
+| `shadowRaid` | 20, or 25 boosted | 6 |
 | `research` | 15 | 10 |
 | `egg` | trainer level, up to 20 | 10 |
 | `rocket` | 8, or 13 boosted | 0, or 4 when boosted |
@@ -80,17 +84,39 @@ In **Settings > Action Button**, choose **Shortcut**, then select your MotiOS Sh
 
 ## Reading the result
 
-CP alone can never identify a single IV spread before catching, so MotiOS reports probabilities instead of a false certainty. All surviving level and IV combinations are equally likely, so the displayed share is the actual chance given the CP you scanned.
+MotiOS returns a dictionary rather than showing its own alert, so Shortcuts controls the popup.
 
-Use `Chance IV >= 80 %` as the decision value. Above 50% MotiOS suggests keeping, below 10% it suggests skipping.
+`title` carries the decision and a matching emoji, based on a wild encounter when that is possible.
+
+`body` lists one line per encounter type that can actually produce the scanned CP, so the list is specific to this Pokemon. Encounter types that share the same level and IV floor are merged into a single line. Each form gets its chance of reaching at least 80% IV:
+
+```text
+Typhlosion - 1532 PC - max 84,4 %
+WILD Base 18,2 % - Hisuian 0,0 %
+SHADOW RAID Base 0,0 %
+% = chance d'avoir au moins 80 % d'IV
+```
+
+A missing line means the scanned CP is impossible there. In the example above a normal raid cannot produce 1532 CP, because raid Pokemon are level 20 with an IV floor of 10, while a shadow raid can thanks to its lower floor of 6.
+
+CP alone can never identify a single IV spread before catching, so MotiOS reports probabilities instead of a false certainty. All surviving level and IV combinations are equally likely, so the displayed share is the actual chance given the CP you scanned.
 
 For a definitive IV spread you still need the HP, the level, or the in-game appraisal after catching.
 
 ## OCR Tips
 
-Pass the complete OCR text to MotiOS. It recognizes the CP labels `PC` and `CP`, then searches each OCR line against the multilingual official-name catalog.
+Pass the complete OCR text to MotiOS, line breaks included. It reads the `PC` and `CP` labels first. If OCR loses the label, it ignores clock times and battery percentages, then keeps the number printed closest to the Pokemon name, so the Poke Ball counter is not mistaken for CP.
 
 French names such as `Pikachu`, `Salameche`, or `M. Mime` are supported, as are official names from the other languages included in PokeAPI. Regional forms are detected from the words `Alola`, `Galar`, `Hisui`, and `Paldea`. Costumes and other special forms remain a known limitation.
+
+## MotiOS Events (optional, standalone)
+
+[scriptable/MotiOS-Events.js](scriptable/MotiOS-Events.js) is a separate script with no dependency on MotiOS or `iv-calculator`. It lists every Pokemon GO event currently active, based on the iPhone's local date and time: Spotlight Hours, Community Days, raids, research, and more.
+
+1. In Scriptable, tap `+`, name the script exactly `MotiOS Events`, then paste the contents of [scriptable/MotiOS-Events.js](scriptable/MotiOS-Events.js). Tap `Done`.
+2. Run it directly from Scriptable, or add it to a Shortcut or the Action Button like `MotiOS`. It needs no parameter; pass `{"locale":"en"}` for the English interface.
+
+Data comes from [ScrapedDuck](https://github.com/bigfoott/ScrapedDuck), which republishes [LeekDuck.com](https://leekduck.com/) with permission, cached locally for 15 minutes.
 
 ## Maintenance and Local Testing
 
