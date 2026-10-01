@@ -41,18 +41,85 @@ function calculateCp(baseStats, level, attackIv, defenseIv, staminaIv) {
     return Math.max(10, Math.floor((attack * Math.sqrt(defense) * Math.sqrt(stamina) * multiplier ** 2) / 10));
 }
 
-function calculatePotentialIvs(baseStats, cp) {
+// Wild encounters only roll whole levels, capped at 30 or at the trainer level below 30.
+const WILD_MAX_LEVEL = 30;
+const WEATHER_BOOST_LEVELS = 5;
+const WEATHER_BOOST_IV_FLOOR = 4;
+
+function getWildEncounterLevels(trainerLevel, weatherBoost) {
+    const cap = Math.min(Number.isFinite(trainerLevel) ? Math.floor(trainerLevel) : WILD_MAX_LEVEL, WILD_MAX_LEVEL);
+    if (cap < 1) {
+        throw new RangeError("trainerLevel must be at least 1");
+    }
+
+    const boost = weatherBoost ? WEATHER_BOOST_LEVELS : 0;
+    const levels = [];
+    for (let level = 1 + boost; level <= cap + boost; level += 1) {
+        levels.push(level);
+    }
+    return levels;
+}
+
+function getWildIvFloor(weatherBoost) {
+    return weatherBoost ? WEATHER_BOOST_IV_FLOOR : 0;
+}
+
+// Non-wild encounters roll a fixed level, which is the strongest precision gain available.
+const ENCOUNTER_SOURCES = {
+    wild: { minIv: 0, boostedMinIv: WEATHER_BOOST_IV_FLOOR },
+    raid: { level: 20, boostedLevel: 25, minIv: 10 },
+    research: { level: 15, minIv: 10 },
+    rocket: { level: 8, boostedLevel: 13, minIv: 0, boostedMinIv: WEATHER_BOOST_IV_FLOOR },
+    giovanni: { level: 8, boostedLevel: 13, minIv: 6 },
+    gbl: { level: 20, minIv: 10 },
+    max: { level: 20, minIv: 10 },
+    egg: { trainerCappedLevel: 20, minIv: 10 }
+};
+
+function getEncounterConstraints(source, trainerLevel, weatherBoost) {
+    const encounter = ENCOUNTER_SOURCES[source];
+    if (!encounter) {
+        throw new RangeError(`unknown encounter source: ${source}`);
+    }
+
+    if (source === "wild") {
+        return {
+            levels: getWildEncounterLevels(trainerLevel, weatherBoost),
+            minIv: getWildIvFloor(weatherBoost)
+        };
+    }
+
+    const minIv = weatherBoost && encounter.boostedMinIv !== undefined ? encounter.boostedMinIv : encounter.minIv;
+    if (encounter.trainerCappedLevel !== undefined) {
+        const cap = Math.min(Math.floor(trainerLevel), encounter.trainerCappedLevel);
+        return { levels: [cap], minIv };
+    }
+
+    const level = weatherBoost && encounter.boostedLevel !== undefined ? encounter.boostedLevel : encounter.level;
+    return { levels: [level], minIv };
+}
+
+function getAllLevels() {
+    return CP_MULTIPLIERS.map((_, multiplierIndex) => 1 + multiplierIndex / 2);
+}
+
+function calculatePotentialIvs(baseStats, cp, options = {}) {
     validateBaseStats(baseStats);
     if (!Number.isInteger(cp) || cp < 10) {
         throw new TypeError("cp must be an integer greater than or equal to 10");
     }
 
+    const levels = options.levels ?? getAllLevels();
+    const minIv = options.minIv ?? 0;
+    if (!Number.isInteger(minIv) || minIv < 0 || minIv > 15) {
+        throw new TypeError("minIv must be an integer between 0 and 15");
+    }
+
     const candidates = [];
-    for (let multiplierIndex = 0; multiplierIndex < CP_MULTIPLIERS.length; multiplierIndex += 1) {
-        const level = 1 + multiplierIndex / 2;
-        for (let attack = 0; attack <= 15; attack += 1) {
-            for (let defense = 0; defense <= 15; defense += 1) {
-                for (let stamina = 0; stamina <= 15; stamina += 1) {
+    for (const level of levels) {
+        for (let attack = minIv; attack <= 15; attack += 1) {
+            for (let defense = minIv; defense <= 15; defense += 1) {
+                for (let stamina = minIv; stamina <= 15; stamina += 1) {
                     if (calculateCp(baseStats, level, attack, defense, stamina) === cp) {
                         candidates.push({
                             level,
@@ -77,12 +144,35 @@ function summarizePotentialIvs(candidates) {
     }
 
     const percentages = candidates.map((candidate) => candidate.percent);
+    const levels = candidates.map((candidate) => candidate.level);
+    const sorted = [...percentages].sort((left, right) => left - right);
+    // Every surviving level/IV combination is equally likely, so a share is a probability.
+    const shareAtLeast = (threshold) => (
+        (percentages.filter((percent) => percent >= threshold).length / percentages.length) * 100
+    );
+
     return {
         count: candidates.length,
-        minPercent: Math.min(...percentages),
-        maxPercent: Math.max(...percentages),
-        best: candidates[0]
+        minPercent: sorted[0],
+        maxPercent: sorted[sorted.length - 1],
+        medianPercent: sorted[Math.floor(sorted.length / 2)],
+        greatChance: shareAtLeast(80),
+        excellentChance: shareAtLeast(90),
+        perfectChance: shareAtLeast(100),
+        minLevel: Math.min(...levels),
+        maxLevel: Math.max(...levels),
+        best: candidates[0],
+        worst: candidates[candidates.length - 1]
     };
 }
 
-module.exports = { CP_MULTIPLIERS, calculateCp, calculatePotentialIvs, summarizePotentialIvs };
+module.exports = {
+    CP_MULTIPLIERS,
+    calculateCp,
+    calculatePotentialIvs,
+    summarizePotentialIvs,
+    getWildEncounterLevels,
+    getWildIvFloor,
+    getEncounterConstraints,
+    ENCOUNTER_SOURCES
+};
