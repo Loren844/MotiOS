@@ -92,10 +92,14 @@ MotiOS returns a dictionary rather than showing its own alert, so Shortcuts cont
 
 ```text
 Typhlosion - 1532 PC - max 84,4 %
-WILD Base 18,2 % - Hisuian 0,0 %
+WILD Base 18,2 % - Hisui 0,0 %
 SHADOW RAID Base 0,0 %
-% = chance d'avoir au moins 80 % d'IV
+Meilleur cas 15/14/12
 ```
+
+Each percentage is the chance that the Pokemon has at least 80% IV. The last line gives the best attack/defense/stamina spread still possible at the scanned CP.
+
+The name is shown exactly as your OCR read it, so it stays in your game language. Form labels follow the interface locale.
 
 A missing line means the scanned CP is impossible there. In the example above a normal raid cannot produce 1532 CP, because raid Pokemon are level 20 with an IV floor of 10, while a shadow raid can thanks to its lower floor of 6.
 
@@ -111,7 +115,15 @@ French names such as `Pikachu`, `Salameche`, or `M. Mime` are supported, as are 
 
 ## MotiOS Events (optional, standalone)
 
-[scriptable/MotiOS-Events.js](scriptable/MotiOS-Events.js) is a separate script with no dependency on MotiOS or `iv-calculator`. It lists every Pokemon GO event currently active, based on the iPhone's local date and time: Spotlight Hours, Community Days, raids, research, and more.
+[scriptable/MotiOS-Events.js](scriptable/MotiOS-Events.js) is a separate script with no dependency on MotiOS or `iv-calculator`. It returns a `title` and `body` dictionary listing the bonuses active right now, based on the iPhone's local date and time, rather than event names.
+
+```text
+2× Catch XP
+Seedot SHINY chances augmentees
+Xerneas SHINY en raid
+```
+
+The feed only attaches bonuses to Spotlight Hours and Community Days, and shiny data to spotlights, community days, raids and research breakthroughs. Plain events carry no bonus field, so bonuses such as unlockable Frustration cannot be listed. Bonus text is shown in English because the source publishes it that way.
 
 1. In Scriptable, tap `+`, name the script exactly `MotiOS Events`, then paste the contents of [scriptable/MotiOS-Events.js](scriptable/MotiOS-Events.js). Tap `Done`.
 2. Run it directly from Scriptable, or add it to a Shortcut or the Action Button like `MotiOS`. It needs no parameter; pass `{"locale":"en"}` for the English interface.
