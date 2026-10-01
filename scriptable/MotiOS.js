@@ -63,7 +63,9 @@ const COPY = {
     notFound: "Pokemon introuvable : {name}. Verifie le texte lu par l'OCR.",
     max: "max",
     boosted: "Meteo boostee",
-    legend: "% = chance d'avoir au moins 80 % d'IV",
+    best: "Meilleur cas",
+    formBase: "Base",
+    forms: { Alolan: "Alola", Galarian: "Galar", Hisuian: "Hisui", Paldean: "Paldea" },
     verdictKeep: "A capturer",
     verdictMaybe: "A verifier",
     verdictSkip: "A ignorer",
@@ -79,7 +81,9 @@ const COPY = {
     notFound: "Pokemon not found: {name}. Check the OCR text.",
     max: "max",
     boosted: "Weather boosted",
-    legend: "% = chance of at least 80% IV",
+    best: "Best case",
+    formBase: "Base",
+    forms: {},
     verdictKeep: "Catch it",
     verdictMaybe: "Worth a check",
     verdictSkip: "Skip it",
@@ -369,9 +373,10 @@ function formatSourceLabel(source) {
   return source.replace(/([A-Z])/g, " $1").toUpperCase();
 }
 
-function getFormLabel(speciesName) {
+function getFormLabel(speciesName, copy) {
   const match = String(speciesName).match(/\(([^)]+)\)/);
-  return match ? match[1] : "Base";
+  if (!match) return copy.formBase;
+  return copy.forms[match[1]] ?? match[1];
 }
 
 function getSpeciesForms(gameMaster, dex) {
@@ -385,7 +390,7 @@ function getSpeciesForms(gameMaster, dex) {
 
 // Several encounter types share the same level and IV floor, so they are merged into one row.
 // A row is kept only when the scanned CP is reachable there, which keeps the output specific.
-function buildSourceRows(forms, cp, trainerLevel, weatherBoost) {
+function buildSourceRows(forms, cp, trainerLevel, weatherBoost, copy) {
   const groups = new Map();
 
   for (const source of Object.keys(ENCOUNTER_SOURCES)) {
@@ -400,7 +405,7 @@ function buildSourceRows(forms, cp, trainerLevel, weatherBoost) {
     const parts = [];
     for (const form of forms) {
       const summary = summarizePotentialIvs(calculatePotentialIvs(form.baseStats, cp, group.constraints));
-      if (summary) parts.push({ label: getFormLabel(form.speciesName), summary });
+      if (summary) parts.push({ label: getFormLabel(form.speciesName, copy), summary });
     }
     if (parts.length > 0) rows.push({ label: group.sources.join(" / "), parts });
   }
@@ -428,14 +433,18 @@ async function buildResult(input) {
   const forms = getSpeciesForms(gameMaster, Number(pokemon.dex));
   const weatherBoost = isWeatherBoosted(input, ocrText) ?? await detectWeatherBoost(pokemon.types || []) ?? false;
   const trainerLevel = getTrainerLevel(input);
-  const rows = buildSourceRows(forms, cp, trainerLevel, weatherBoost);
-  const displayName = pokemon.speciesName.replace(/\s*\([^)]*\)/g, "");
+  const rows = buildSourceRows(forms, cp, trainerLevel, weatherBoost, copy);
+  // The scanned text already holds the name in the player's own language, unlike the Game Master.
+  const displayName = name || ocrMatch?.name || pokemon.speciesName.replace(/\s*\([^)]*\)/g, "");
   if (rows.length === 0) {
     throw new Error(formatMessage(copy.noResult, { name: displayName, cp }));
   }
 
   const allSummaries = rows.flatMap((row) => row.parts.map((part) => part.summary));
   const maxPercent = Math.max(...allSummaries.map((summary) => summary.maxPercent));
+  const bestCandidate = allSummaries
+    .map((summary) => summary.best)
+    .reduce((left, right) => (right.percent > left.percent ? right : left));
   const decisionRow = rows.find((row) => row.label.startsWith("WILD")) ?? rows[0];
   const decisionChance = Math.max(...decisionRow.parts.map((part) => part.summary.greatChance));
   const verdict = getVerdict(decisionChance, copy);
@@ -446,7 +455,7 @@ async function buildResult(input) {
       .map((part) => `${part.label} ${formatPercent(part.summary.greatChance)} %`)
       .join(" - ")}`),
     weatherBoost ? copy.boosted : null,
-    copy.legend
+    `${copy.best} ${bestCandidate.attack}/${bestCandidate.defense}/${bestCandidate.stamina}`
   ].filter(Boolean).join("\n");
 
   return { title: `${verdict.emoji} ${verdict.text}`, body };
