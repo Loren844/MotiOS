@@ -1,6 +1,10 @@
 // Scriptable script. Save this file as "MotiOS" and iv-calculator.js as "iv-calculator".
 
-const { calculatePotentialIvs, summarizePotentialIvs } = importModule("iv-calculator");
+const {
+  calculatePotentialIvs,
+  summarizePotentialIvs,
+  getEncounterConstraints
+} = importModule("iv-calculator");
 
 const GAME_MASTER_URL = "https://raw.githubusercontent.com/pvpoke/pvpoke/master/src/data/gamemaster.json";
 const SPECIES_NAMES_URL = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv/pokemon_species_names.csv";
@@ -8,6 +12,16 @@ const GAME_MASTER_CACHE_FILE = "motios-gamemaster.json";
 const NAME_CATALOG_CACHE_FILE = "motios-species-names.json";
 const GAME_MASTER_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const NAME_CATALOG_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const TRAINER_LEVEL_KEY = "motios-trainer-level";
+// Wild levels stop at 30, so this default is exact for any trainer at level 30 or above.
+const DEFAULT_TRAINER_LEVEL = 30;
+
+const REGIONAL_FORMS = [
+  { pattern: /alola/i, suffix: "alolan" },
+  { pattern: /galar/i, suffix: "galarian" },
+  { pattern: /hisui/i, suffix: "hisuian" },
+  { pattern: /paldea/i, suffix: "paldean" }
+];
 
 const COPY = {
   fr: {
@@ -20,8 +34,17 @@ const COPY = {
     notFound: "Pokemon introuvable : {name}. Verifie le texte lu par l'OCR.",
     combinations: "combinaisons possibles",
     range: "IV possibles",
+    median: "IV median",
+    great: "Chance IV >= 80 %",
+    excellent: "Chance IV >= 90 %",
+    perfect: "Chance de 100 %",
     best: "Meilleur cas",
-    level: "Niveau possible",
+    worst: "Pire cas",
+    level: "Niveau",
+    boosted: "Meteo boostee",
+    verdictKeep: "A garder",
+    verdictMaybe: "A verifier apres capture",
+    verdictSkip: "Peu interessant",
     close: "OK"
   },
   en: {
@@ -34,8 +57,17 @@ const COPY = {
     notFound: "Pokemon not found: {name}. Check the OCR text.",
     combinations: "possible combinations",
     range: "Possible IVs",
+    median: "Median IV",
+    great: "Chance IV >= 80%",
+    excellent: "Chance IV >= 90%",
+    perfect: "Chance of 100%",
     best: "Best case",
-    level: "Possible level",
+    worst: "Worst case",
+    level: "Level",
+    boosted: "Weather boosted",
+    verdictKeep: "Worth keeping",
+    verdictMaybe: "Check after catching",
+    verdictSkip: "Low value",
     close: "OK"
   }
 };
@@ -66,12 +98,15 @@ function parseInput() {
     try {
       return JSON.parse(parameter);
     } catch (_) {
-      throw new Error("Le parametre du raccourci doit etre du JSON, par exemple {\"name\":\"Pikachu\",\"cp\":523}.");
+      return { text: parameter };
     }
   }
 
   if (args.queryParameters.name && args.queryParameters.cp) {
     return { name: args.queryParameters.name, cp: args.queryParameters.cp };
+  }
+  if (args.queryParameters.text) {
+    return { text: args.queryParameters.text };
   }
   return null;
 }
@@ -172,19 +207,71 @@ async function getNameCatalog() {
 }
 
 function findPokemon(gameMaster, nameCatalog, pokemonName) {
-  const wantedName = normalizeName(pokemonName);
+  const rawName = String(pokemonName);
+  const region = REGIONAL_FORMS.find((form) => form.pattern.test(rawName));
   const pokemon = gameMaster.pokemon || gameMaster;
   if (!Array.isArray(pokemon)) throw new Error("Format du Game Master inattendu.");
 
+  const wantedName = normalizeName(rawName);
   const directMatch = pokemon.find((entry) => (
     normalizeName(entry.speciesName) === wantedName
     || normalizeName(entry.speciesId) === wantedName
-    || normalizeName(entry.name) === wantedName
   ));
   if (directMatch) return directMatch;
 
-  const dex = nameCatalog[wantedName];
-  return pokemon.find((entry) => Number(entry.dex) === dex);
+  const baseName = region ? normalizeName(rawName.replace(region.pattern, "")) : wantedName;
+  const dex = nameCatalog[baseName];
+  if (dex === undefined) return null;
+
+  const sameDex = pokemon.filter((entry) => Number(entry.dex) === dex && !/shadow/i.test(entry.speciesId));
+  if (region) {
+    const regionalForm = sameDex.find((entry) => entry.speciesId.endsWith(`_${region.suffix}`));
+    if (regionalForm) return regionalForm;
+  }
+  return sameDex.find((entry) => !entry.speciesName.includes("(")) ?? sameDex[0] ?? null;
+}
+
+function parseCp(value) {
+  const match = String(value || "").match(/(?:PC|CP)\s*[:.]?\s*(\d{1,5})/i);
+  return match ? Number.parseInt(match[1], 10) : Number.parseInt(String(value || "").replace(/\D/g, ""), 10);
+}
+
+function findPokemonInOcr(gameMaster, nameCatalog, text) {
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((line) => line.replace(/(?:PC|CP)\s*[:.]?\s*\d{1,5}/gi, "").trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const pokemon = findPokemon(gameMaster, nameCatalog, line);
+    if (pokemon) return { pokemon, name: line };
+  }
+  return null;
+}
+
+function getTrainerLevel(input) {
+  const provided = Number.parseInt(String(input.trainerLevel ?? ""), 10);
+  if (Number.isInteger(provided) && provided >= 1 && provided <= 50) {
+    Keychain.set(TRAINER_LEVEL_KEY, String(provided));
+    return provided;
+  }
+
+  const stored = Keychain.contains(TRAINER_LEVEL_KEY)
+    ? Number.parseInt(Keychain.get(TRAINER_LEVEL_KEY), 10)
+    : NaN;
+  return Number.isInteger(stored) && stored >= 1 && stored <= 50 ? stored : DEFAULT_TRAINER_LEVEL;
+}
+
+function isWeatherBoosted(input, ocrText) {
+  if (typeof input.weatherBoost === "boolean") return input.weatherBoost;
+  if (typeof input.weather === "boolean") return input.weather;
+  return /meteo|weather|boost/i.test(ocrText);
+}
+
+function getVerdict(summary, copy) {
+  if (summary.greatChance >= 50) return copy.verdictKeep;
+  if (summary.greatChance >= 10) return copy.verdictMaybe;
+  return copy.verdictSkip;
 }
 
 function formatPercent(value) {
@@ -194,30 +281,47 @@ function formatPercent(value) {
 async function showResult(input) {
   const copy = getCopy(input.locale);
   const name = String(input.name || "").trim();
-  const cp = Number.parseInt(String(input.cp || "").replace(/\D/g, ""), 10);
-  if (!name || !Number.isInteger(cp) || cp < 10) {
+  const ocrText = String(input.text || input.ocr || input.ocrText || "");
+  const cp = parseCp(input.cp) || parseCp(ocrText);
+  if (!Number.isInteger(cp) || cp < 10) {
     throw new Error(copy.invalidInput);
   }
 
   const [gameMaster, nameCatalog] = await Promise.all([getGameMaster(), getNameCatalog()]);
-  const pokemon = findPokemon(gameMaster, nameCatalog, name);
+  const ocrMatch = name ? null : findPokemonInOcr(gameMaster, nameCatalog, ocrText);
+  const pokemon = name ? findPokemon(gameMaster, nameCatalog, name) : ocrMatch?.pokemon;
+  const displayName = pokemon?.speciesName || name || ocrMatch?.name || "OCR";
   if (!pokemon?.baseStats) {
-    throw new Error(formatMessage(copy.notFound, { name }));
+    throw new Error(formatMessage(copy.notFound, { name: name || ocrText.split(/\r?\n/)[0] || "OCR" }));
   }
 
-  const summary = summarizePotentialIvs(calculatePotentialIvs(pokemon.baseStats, cp));
+  const weatherBoost = isWeatherBoosted(input, ocrText);
+  const trainerLevel = getTrainerLevel(input);
+  const source = String(input.source || "wild").toLowerCase();
+  const constraints = getEncounterConstraints(source, trainerLevel, weatherBoost);
+  const summary = summarizePotentialIvs(calculatePotentialIvs(pokemon.baseStats, cp, constraints));
   if (!summary) {
-    throw new Error(formatMessage(copy.noResult, { name, cp }));
+    throw new Error(formatMessage(copy.noResult, { name: displayName, cp }));
   }
 
   const best = summary.best;
+  const worst = summary.worst;
+  const levelRange = summary.minLevel === summary.maxLevel
+    ? `${summary.minLevel}`
+    : `${summary.minLevel} - ${summary.maxLevel}`;
   const alert = new Alert();
-  alert.title = `${name} - ${cp} ${copy.cp}`;
+  alert.title = `${displayName} - ${cp} ${copy.cp}`;
   alert.message = [
-    `${summary.count} ${copy.combinations}`,
+    getVerdict(summary, copy),
+    `${copy.great}: ${formatPercent(summary.greatChance)} %`,
+    `${copy.excellent}: ${formatPercent(summary.excellentChance)} %`,
+    `${copy.perfect}: ${formatPercent(summary.perfectChance)} %`,
+    `${copy.median}: ${formatPercent(summary.medianPercent)} %`,
     `${copy.range}: ${formatPercent(summary.minPercent)} a ${formatPercent(summary.maxPercent)} %`,
-    `${copy.best}: ${best.attack}/${best.defense}/${best.stamina} (${formatPercent(best.percent)} %)`,
-    `${copy.level}: ${best.level}`
+    `${copy.best}: ${best.attack}/${best.defense}/${best.stamina}`,
+    `${copy.worst}: ${worst.attack}/${worst.defense}/${worst.stamina}`,
+    `${copy.level}: ${levelRange}`,
+    `${summary.count} ${copy.combinations}${weatherBoost ? ` - ${copy.boosted}` : ""}`
   ].join("\n");
   alert.addAction(copy.close);
   await alert.presentAlert();
